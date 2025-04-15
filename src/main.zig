@@ -66,7 +66,7 @@ pub fn wasi_cwd() std.os.wasi.fd_t {
 const fatal = std.process.fatal;
 
 /// This can be global since stdout is a singleton.
-var stdout_buffer: [4096]u8 = undefined;
+var stdio_buffer: [4096]u8 = undefined;
 
 /// Shaming all the locations that inappropriately use an O(N) search algorithm.
 /// Please delete this and fix the compilation errors!
@@ -5616,7 +5616,7 @@ fn jitCmd(
         defer comp.destroy();
 
         if (options.server) {
-            var server = std.zig.Server{
+            var server: std.zig.Server = .{
                 .out = fs.File.stdout(),
                 .in = undefined, // won't be receiving messages
                 .receive_fifo = undefined, // won't be receiving messages
@@ -5807,7 +5807,7 @@ const ArgIteratorResponseFile = process.ArgIteratorGeneral(.{ .comments = true, 
 /// Initialize the arguments from a Response File. "*.rsp"
 fn initArgIteratorResponseFile(allocator: Allocator, resp_file_path: []const u8) !ArgIteratorResponseFile {
     const max_bytes = 10 * 1024 * 1024; // 10 MiB of command line arguments is a reasonable limit
-    const cmd_line = try fs.cwd().readFileAlloc(allocator, resp_file_path, max_bytes);
+    const cmd_line = try fs.cwd().readFileAlloc(resp_file_path, allocator, .limited(max_bytes));
     errdefer allocator.free(cmd_line);
 
     return ArgIteratorResponseFile.initTakeOwnership(allocator, cmd_line);
@@ -6196,11 +6196,7 @@ fn cmdAstCheck(
 
     const tree = try Ast.parse(arena, source, mode);
 
-    var bw: std.io.BufferedWriter = .{
-        .unbuffered_writer = fs.File.stdout().writer(),
-        .buffer = &stdout_buffer,
-    };
-
+    var stdout_bw = fs.File.stdout().writer().buffered(&stdio_buffer);
     switch (mode) {
         .zig => {
             const zir = try AstGen.generate(arena, tree);
@@ -6244,7 +6240,7 @@ fn cmdAstCheck(
                 const total_bytes = @sizeOf(Zir) + instruction_bytes + extra_bytes +
                     zir.string_bytes.len * @sizeOf(u8);
                 // zig fmt: off
-                try bw.print(
+                try stdout_bw.print(
                     \\# Source bytes:       {Bi}
                     \\# Tokens:             {} ({Bi})
                     \\# AST Nodes:          {} ({Bi})
@@ -6265,8 +6261,8 @@ fn cmdAstCheck(
                 // zig fmt: on
             }
 
-            try @import("print_zir.zig").renderAsText(arena, tree, zir, &bw);
-            try bw.flush();
+            try @import("print_zir.zig").renderAsText(arena, tree, zir, &stdout_bw);
+            try stdout_bw.flush();
 
             if (zir.hasCompileErrors()) {
                 process.exit(1);
@@ -6293,8 +6289,8 @@ fn cmdAstCheck(
                 fatal("-t option only available in builds of zig with debug extensions", .{});
             }
 
-            try @import("print_zoir.zig").renderToWriter(zoir, arena, &bw);
-            try bw.flush();
+            try @import("print_zoir.zig").renderToWriter(zoir, arena, &stdout_bw);
+            try stdout_bw.flush();
             return cleanExit();
         },
     }
@@ -6322,8 +6318,7 @@ fn cmdDetectCpu(args: []const []const u8) !void {
             const arg = args[i];
             if (mem.startsWith(u8, arg, "-")) {
                 if (mem.eql(u8, arg, "-h") or mem.eql(u8, arg, "--help")) {
-                    const stdout = fs.File.stdout().writer();
-                    try stdout.writeAll(detect_cpu_usage);
+                    try fs.File.stdout().writeAll(detect_cpu_usage);
                     return cleanExit();
                 } else if (mem.eql(u8, arg, "--llvm")) {
                     use_llvm = true;
@@ -6415,13 +6410,10 @@ fn detectNativeCpuWithLLVM(
 }
 
 fn printCpu(cpu: std.Target.Cpu) !void {
-    var bw: std.io.BufferedWriter = .{
-        .unbuffered_writer = fs.File.stdout().writer(),
-        .buffer = &stdout_buffer,
-    };
+    var stdout_bw = fs.File.stdout().writer().buffered(&stdio_buffer);
 
     if (cpu.model.llvm_name) |llvm_name| {
-        try bw.print("{s}\n", .{llvm_name});
+        try stdout_bw.print("{s}\n", .{llvm_name});
     }
 
     const all_features = cpu.arch.allFeaturesList();
@@ -6430,10 +6422,10 @@ fn printCpu(cpu: std.Target.Cpu) !void {
         const index: std.Target.Cpu.Feature.Set.Index = @intCast(index_usize);
         const is_enabled = cpu.features.isEnabled(index);
         const plus_or_minus = "-+"[@intFromBool(is_enabled)];
-        try bw.print("{c}{s}\n", .{ plus_or_minus, llvm_name });
+        try stdout_bw.print("{c}{s}\n", .{ plus_or_minus, llvm_name });
     }
 
-    try bw.flush();
+    try stdout_bw.flush();
 }
 
 fn cmdDumpLlvmInts(
@@ -6466,16 +6458,13 @@ fn cmdDumpLlvmInts(
     const dl = tm.createTargetDataLayout();
     const context = llvm.Context.create();
 
-    var bw = io.bufferedWriter(fs.File.stdout().writer());
-    const stdout = bw.writer();
-
+    var stdout_bw = fs.File.stdout().writer().buffered(&stdio_buffer);
     for ([_]u16{ 1, 8, 16, 32, 64, 128, 256 }) |bits| {
         const int_type = context.intType(bits);
         const alignment = dl.abiAlignmentOfType(int_type);
-        try stdout.print("LLVMABIAlignmentOfType(i{d}) == {d}\n", .{ bits, alignment });
+        try stdout_bw.print("LLVMABIAlignmentOfType(i{d}) == {d}\n", .{ bits, alignment });
     }
-
-    try bw.flush();
+    try stdout_bw.flush();
 
     return cleanExit();
 }
@@ -6498,11 +6487,7 @@ fn cmdDumpZir(
 
     const zir = try Zcu.loadZirCache(arena, f);
 
-    var bw: std.io.BufferedWriter = .{
-        .unbuffered_writer = fs.File.stdout().writer(),
-        .buffer = &stdout_buffer,
-    };
-
+    var stdout_bw = fs.File.stdout().writer().buffered(&stdio_buffer);
     {
         const instruction_bytes = zir.instructions.len *
             // Here we don't use @sizeOf(Zir.Inst.Data) because it would include
@@ -6512,7 +6497,7 @@ fn cmdDumpZir(
         const total_bytes = @sizeOf(Zir) + instruction_bytes + extra_bytes +
             zir.string_bytes.len * @sizeOf(u8);
         // zig fmt: off
-        try bw.print(
+        try stdout_bw.print(
             \\# Total ZIR bytes:    {Bi}
             \\# Instructions:       {d} ({Bi})
             \\# String Table Bytes: {Bi}
@@ -6527,8 +6512,8 @@ fn cmdDumpZir(
         // zig fmt: on
     }
 
-    try @import("print_zir.zig").renderAsText(arena, null, zir, &bw);
-    try bw.flush();
+    try @import("print_zir.zig").renderAsText(arena, null, zir, &stdout_bw);
+    try stdout_bw.flush();
 }
 
 /// This is only enabled for debug builds.
@@ -6586,21 +6571,18 @@ fn cmdChangelist(
     var inst_map: std.AutoHashMapUnmanaged(Zir.Inst.Index, Zir.Inst.Index) = .empty;
     try Zcu.mapOldZirToNew(arena, old_zir, new_zir, &inst_map);
 
-    var bw: std.io.BufferedWriter = .{
-        .unbuffered_writer = fs.File.stdout().writer(),
-        .buffer = &stdout_buffer,
-    };
+    var stdout_bw = fs.File.stdout().writer().buffered(&stdio_buffer);
     {
-        try bw.print("Instruction mappings:\n", .{});
+        try stdout_bw.print("Instruction mappings:\n", .{});
         var it = inst_map.iterator();
         while (it.next()) |entry| {
-            try bw.print(" %{d} => %{d}\n", .{
+            try stdout_bw.print(" %{d} => %{d}\n", .{
                 @intFromEnum(entry.key_ptr.*),
                 @intFromEnum(entry.value_ptr.*),
             });
         }
     }
-    try bw.flush();
+    try stdout_bw.flush();
 }
 
 fn eatIntPrefix(arg: []const u8, base: u8) []const u8 {
@@ -6935,8 +6917,7 @@ fn cmdFetch(
             const arg = args[i];
             if (mem.startsWith(u8, arg, "-")) {
                 if (mem.eql(u8, arg, "-h") or mem.eql(u8, arg, "--help")) {
-                    const stdout = fs.File.stdout().writer();
-                    try stdout.writeAll(usage_fetch);
+                    try fs.File.stdout().writeAll(usage_fetch);
                     return cleanExit();
                 } else if (mem.eql(u8, arg, "--global-cache-dir")) {
                     if (i + 1 >= args.len) fatal("expected argument after '{s}'", .{arg});
@@ -7049,7 +7030,9 @@ fn cmdFetch(
 
     const name = switch (save) {
         .no => {
-            try fs.File.stdout().writer().print("{s}\n", .{package_hash_slice});
+            var stdout_bw = fs.File.stdout().writer().buffered(&stdio_buffer);
+            try stdout_bw.print("{s}\n", .{package_hash_slice});
+            try stdout_bw.flush();
             return cleanExit();
         },
         .yes, .exact => |name| name: {
@@ -7085,7 +7068,7 @@ fn cmdFetch(
     var saved_path_or_url = path_or_url;
 
     if (fetch.latest_commit) |latest_commit| resolved: {
-        const latest_commit_hex = try std.fmt.allocPrint(arena, "{}", .{latest_commit});
+        const latest_commit_hex = try std.fmt.allocPrint(arena, "{f}", .{latest_commit});
 
         var uri = try std.Uri.parse(path_or_url);
 
@@ -7098,7 +7081,7 @@ fn cmdFetch(
             std.log.info("resolved ref '{s}' to commit {s}", .{ target_ref, latest_commit_hex });
 
             // include the original refspec in a query parameter, could be used to check for updates
-            uri.query = .{ .percent_encoded = try std.fmt.allocPrint(arena, "ref={%}", .{fragment}) };
+            uri.query = .{ .percent_encoded = try std.fmt.allocPrint(arena, "ref={f%}", .{fragment}) };
         } else {
             std.log.info("resolved to commit {s}", .{latest_commit_hex});
         }
@@ -7107,22 +7090,22 @@ fn cmdFetch(
         uri.fragment = .{ .raw = latest_commit_hex };
 
         switch (save) {
-            .yes => saved_path_or_url = try std.fmt.allocPrint(arena, "{}", .{uri}),
+            .yes => saved_path_or_url = try std.fmt.allocPrint(arena, "{f}", .{uri}),
             .no, .exact => {}, // keep the original URL
         }
     }
 
     const new_node_init = try std.fmt.allocPrint(arena,
         \\.{{
-        \\            .url = "{}",
-        \\            .hash = "{}",
+        \\            .url = "{f}",
+        \\            .hash = "{f}",
         \\        }}
     , .{
         std.zig.fmtEscapes(saved_path_or_url),
         std.zig.fmtEscapes(package_hash_slice),
     });
 
-    const new_node_text = try std.fmt.allocPrint(arena, ".{p_} = {s},\n", .{
+    const new_node_text = try std.fmt.allocPrint(arena, ".{fp_} = {s},\n", .{
         std.zig.fmtId(name), new_node_init,
     });
 
@@ -7149,12 +7132,12 @@ fn cmdFetch(
 
         const location_replace = try std.fmt.allocPrint(
             arena,
-            "\"{}\"",
+            "\"{f}\"",
             .{std.zig.fmtEscapes(saved_path_or_url)},
         );
         const hash_replace = try std.fmt.allocPrint(
             arena,
-            "\"{}\"",
+            "\"{f}\"",
             .{std.zig.fmtEscapes(package_hash_slice)},
         );
 
@@ -7182,15 +7165,11 @@ fn cmdFetch(
         fatal("unable to create {s} file: {s}", .{ Package.Manifest.basename, err });
     };
     defer file.close();
-    var buffer: [4096]u8 = undefined;
-    var bw: std.io.BufferedWriter = .{
-        .unbuffered_writer = file.writer(),
-        .buffer = &buffer,
-    };
-    ast.render(gpa, &bw, fixups) catch |err| fatal("failed to render AST to {s}: {s}", .{
+    var stdout_bw = fs.File.stdout().writer().buffered(&stdio_buffer);
+    ast.render(gpa, &stdout_bw, fixups) catch |err| fatal("failed to render AST to {s}: {s}", .{
         Package.Manifest.basename, err,
     });
-    bw.flush() catch |err| fatal("failed to flush {s}: {s}", .{ Package.Manifest.basename, err });
+    stdout_bw.flush() catch |err| fatal("failed to flush {s}: {s}", .{ Package.Manifest.basename, err });
     return cleanExit();
 }
 
@@ -7343,9 +7322,9 @@ fn loadManifest(
 ) !struct { Package.Manifest, Ast } {
     const manifest_bytes = while (true) {
         break options.dir.readFileAllocOptions(
-            arena,
             Package.Manifest.basename,
-            Package.Manifest.max_bytes,
+            arena,
+            .limited(Package.Manifest.max_bytes),
             null,
             .@"1",
             0,
@@ -7422,7 +7401,7 @@ const Templates = struct {
         }
 
         const max_bytes = 10 * 1024 * 1024;
-        const contents = templates.dir.readFileAlloc(arena, template_path, max_bytes) catch |err| {
+        const contents = templates.dir.readFileAlloc(template_path, arena, .limited(max_bytes)) catch |err| {
             fatal("unable to read template file '{s}': {s}", .{ template_path, @errorName(err) });
         };
         templates.buffer.clearRetainingCapacity();
@@ -7459,7 +7438,7 @@ const Templates = struct {
                     i += ".NAME".len;
                     continue;
                 } else if (std.mem.startsWith(u8, contents[i..], ".FINGERPRINT")) {
-                    try templates.buffer.writer().print("0x{x}", .{fingerprint.int()});
+                    try templates.buffer.print("0x{x}", .{fingerprint.int()});
                     i += ".FINGERPRINT".len;
                     continue;
                 } else if (std.mem.startsWith(u8, contents[i..], ".ZIGVER")) {
